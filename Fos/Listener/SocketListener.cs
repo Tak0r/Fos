@@ -8,98 +8,100 @@ using System.Threading;
 using System.Threading.Tasks;
 using FastCgiNet;
 using Fos.Logging;
+using System.IO;
 
 namespace Fos.Listener
 {
-	/// <summary>
-	/// This class will provide you a listener application. It will listen to new connections and handle data while
-	/// providing ways for you to know what records different FastCgi connections are receiving. It features a highly asynchronous
-	/// main loop to make things run fast!
-	/// </summary>
-	public abstract class SocketListener : IDisposable
-	{
-		private int listenBacklog = 500;
-		private Socket tcpListenSocket;
-		private Socket unixListenSocket;
+    /// <summary>
+    /// This class will provide you a listener application. It will listen to new connections and handle data while
+    /// providing ways for you to know what records different FastCgi connections are receiving. It features a highly asynchronous
+    /// main loop to make things run fast!
+    /// </summary>
+    public abstract class SocketListener : IDisposable
+    {
+        private int listenBacklog = 500;
+        private Socket tcpListenSocket;
+        private Socket unixListenSocket;
         private string unixSocketFilePath;
-		private bool SomeListenSocketHasBeenBound
-		{
-			get
-			{
-				return (tcpListenSocket != null && tcpListenSocket.IsBound) || ( unixListenSocket != null && unixListenSocket.IsBound);
-			}
-		}
-		private IServerLogger Logger;
+        private bool SomeListenSocketHasBeenBound
+        {
+            get
+            {
+                return (tcpListenSocket != null && tcpListenSocket.IsBound) || (unixListenSocket != null && unixListenSocket.IsBound);
+            }
+        }
+        private IServerLogger Logger;
 
-		public bool IsRunning { get; private set; }
+        public bool IsRunning { get; private set; }
 
-		/// <summary>
-		/// Requests indexed by their sockets. There is no support for multiplexing.
-		/// </summary>
-		private ConcurrentDictionary<Socket, FosRequest> OpenSockets = new ConcurrentDictionary<Socket, FosRequest>();
+        /// <summary>
+        /// Requests indexed by their sockets. There is no support for multiplexing.
+        /// </summary>
+        private ConcurrentDictionary<Socket, FosRequest> OpenSockets = new ConcurrentDictionary<Socket, FosRequest>();
 
-		/// <summary>
-		/// Closes and disposes of a Request and its Socket while also removing it from the internal collection of open sockets.
-		/// </summary>
-		private void OnAbruptSocketClose(Socket sock, FosRequest fosRequest)
-		{
-			FosRequest trash;
-			OpenSockets.TryRemove(sock, out trash);
+        /// <summary>
+        /// Closes and disposes of a Request and its Socket while also removing it from the internal collection of open sockets.
+        /// </summary>
+        private void OnAbruptSocketClose(Socket sock, FosRequest fosRequest)
+        {
+            FosRequest trash;
+            OpenSockets.TryRemove(sock, out trash);
             fosRequest.Dispose();
 
-			if (Logger != null)
-			{
-				Logger.LogConnectionClosedAbruptly(sock, new RequestInfo(fosRequest));
-			}
-		}
-		
-		/// <summary>
-		/// Closes and disposes of a Request and its Socket while also removing it from the internal collection of open sockets.
-		/// </summary>
-		private void OnNormalSocketClose(Socket sock, FosRequest fosRequest)
-		{
-			if (fosRequest == null)
-				throw new ArgumentNullException("fosRequest");
-		    
+            if (Logger != null)
+            {
+                Logger.LogConnectionClosedAbruptly(sock, new RequestInfo(fosRequest));
+            }
+        }
+
+        /// <summary>
+        /// Closes and disposes of a Request and its Socket while also removing it from the internal collection of open sockets.
+        /// </summary>
+        private void OnNormalSocketClose(Socket sock, FosRequest fosRequest)
+        {
+            if (fosRequest == null)
+                throw new ArgumentNullException("fosRequest");
+
             //TODO: We should make sure that this method never gets called if OnAbruptSocketClose was called.
             // This is just a staple solution, it is subject to race conditions
             FosRequest trash;
             if (OpenSockets.TryRemove(sock, out trash) && Logger != null)
             {
+                trash.Dispose();
                 Logger.LogConnectionEndedNormally(sock, new RequestInfo(fosRequest));
             }
-		}
+        }
 
         internal abstract void OnRecordBuilt(FosRequest req, RecordBase rec);
 
-		private void Work()
-		{
-			byte[] buffer = new byte[8192];
-			int selectMaximumTime = -1;
-			while (true)
-			{
-				try
-				{
-					// ReadSet: We want Select to return when either a new connection has arrived or when there is incoming socket data
-					List<Socket> socketsReadSet = OpenSockets.Keys.ToList();
-					if (tcpListenSocket != null && tcpListenSocket.IsBound)
-						socketsReadSet.Add(tcpListenSocket);
-					if (unixListenSocket != null && unixListenSocket.IsBound)
-						socketsReadSet.Add(unixListenSocket);
+        private void Work()
+        {
+            byte[] buffer = new byte[8192];
+            int selectMaximumTime = -1;
+            while (true)
+            {
+                try
+                {
+                    // ReadSet: We want Select to return when either a new connection has arrived or when there is incoming socket data
+                    List<Socket> socketsReadSet = OpenSockets.Keys.ToList();
+                    if (tcpListenSocket != null && tcpListenSocket.IsBound)
+                        socketsReadSet.Add(tcpListenSocket);
+                    if (unixListenSocket != null && unixListenSocket.IsBound)
+                        socketsReadSet.Add(unixListenSocket);
 
-					Socket.Select(socketsReadSet, null, null, selectMaximumTime);
+                    Socket.Select(socketsReadSet, null, null, selectMaximumTime);
 
-					foreach (Socket sock in socketsReadSet)
-					{
-						// In case this sock is in the read set just because a connection has been accepted,
-						// it must be a listen socket and we should accept the new queued connections
-						if (sock == tcpListenSocket || sock == unixListenSocket)
-						{
-							BeginAcceptNewConnections(sock);
-							continue;
-						}
+                    foreach (Socket sock in socketsReadSet)
+                    {
+                        // In case this sock is in the read set just because a connection has been accepted,
+                        // it must be a listen socket and we should accept the new queued connections
+                        if (sock == tcpListenSocket || sock == unixListenSocket)
+                        {
+                            BeginAcceptNewConnections(sock);
+                            continue;
+                        }
 
-						// Get some data on the socket
+                        // Get some data on the socket
                         FosRequest fosRequest;
                         if (!OpenSockets.TryGetValue(sock, out fosRequest))
                         {
@@ -119,7 +121,7 @@ namespace Fos.Listener
                         {
                             // This can happen if the application closed the socket but this loop
                             // still had time to find the request in OpenSockets before it got removed.
-                            //TODO: This can also mean the socket was closed by the other side, so we need a way to differentiate them
+                            // TODO: This can also mean the socket was closed by the other side, so we need a way to differentiate them
                             continue;
                         }
                         catch (SocketException e)
@@ -150,42 +152,42 @@ namespace Fos.Listener
                             continue;
                         }
 
-						// Feed the request's record factory
-						// An exception thrown here means an implementer did not catch the application's exception. It is indeed a server error.
-						try
-						{
+                        // Feed the request's record factory
+                        // An exception thrown here means an implementer did not catch the application's exception. It is indeed a server error.
+                        try
+                        {
                             foreach (var rec in fosRequest.FeedBytes(buffer, 0, bytesRead))
                                 OnRecordBuilt(fosRequest, rec);
-						}
-						catch (Exception e)
-						{
-							// Log and end request
-							if (Logger != null)
-								Logger.LogServerError(e, "The server did not handle an exception thrown by the application");
+                        }
+                        catch (Exception e)
+                        {
+                            // Log and end request
+                            if (Logger != null)
+                                Logger.LogServerError(e, "The server did not handle an exception thrown by the application");
 
                             fosRequest.Dispose();
-							continue;
-						}
-					}
-				}
-				catch (Exception e)
+                            continue;
+                        }
+                    }
+                }
+                catch (Exception e)
                 {
-					if (Logger != null)
-						Logger.LogServerError(e, "Exception would end the data receiving loop. This is extremely bad. Please file a bug report.");
-				}
-			}
-		}
+                    if (Logger != null)
+                        Logger.LogServerError(e, "Exception would end the data receiving loop. This is extremely bad. Please file a bug report.");
+                }
+            }
+        }
 
-		/// <summary>
-		/// Accepts all pending connections on a socket asynchronously.
-		/// </summary>
-		private void BeginAcceptNewConnections(Socket listenSocket)
-		{
-			Socket newConnection;
-			try
-			{
-				// The commented implementation crashes Mono with a too many heaps warning on Mono 3.0.7... investigate later
-				/*
+        /// <summary>
+        /// Accepts all pending connections on a socket asynchronously.
+        /// </summary>
+        private void BeginAcceptNewConnections(Socket listenSocket)
+        {
+            Socket newConnection;
+            try
+            {
+                // The commented implementation crashes Mono with a too many heaps warning on Mono 3.0.7... investigate later
+                /*
 				SocketAsyncEventArgs args;
 				do
 				{
@@ -194,41 +196,41 @@ namespace Fos.Listener
 				}
 				while (listenSocket.AcceptAsync(args) == true);*/
 
-				newConnection = listenSocket.Accept();
-				//var request = new SocketRequest(newConnection, false);
-				
-				//OpenSockets[newConnection] = new RecordFactoryAndRequest(new RecordFactory(), newConnection, Logger);
+                newConnection = listenSocket.Accept();
+                //var request = new SocketRequest(newConnection, false);
+
+                //OpenSockets[newConnection] = new RecordFactoryAndRequest(new RecordFactory(), newConnection, Logger);
                 var request = new FosRequest(newConnection, Logger);
                 request.OnSocketClose += () => OnNormalSocketClose(newConnection, request);
                 OpenSockets[newConnection] = request;
-				if (Logger != null)
-					Logger.LogConnectionReceived(newConnection);
-			}
-			catch (Exception e)
-			{
-				if (Logger != null)
+                if (Logger != null)
+                    Logger.LogConnectionReceived(newConnection);
+            }
+            catch (Exception e)
+            {
+                if (Logger != null)
                     Logger.LogSocketError(listenSocket, e, "Error when accepting connection on the listen socket.");
-			}
-		}
+            }
+        }
 
-		/// <summary>
-		/// Set this to an <see cref="Fos.Logging.IServerLogger"/> to log server information.
-		/// </summary>
-		public virtual void SetLogger(IServerLogger logger)
-		{
-			if (logger == null)
-				throw new ArgumentNullException("logger");
+        /// <summary>
+        /// Set this to an <see cref="IServerLogger"/> to log server information.
+        /// </summary>
+        public virtual void SetLogger(IServerLogger logger)
+        {
+            if (logger == null)
+                throw new ArgumentNullException("logger");
 
-			this.Logger = logger;
-		}
+            this.Logger = logger;
+        }
 
-		/// <summary>
-		/// Defines on what address and what port the TCP socket will listen on.
-		/// </summary>
-		public void Bind(IPAddress addr, int port)
-		{
-			tcpListenSocket.Bind(new IPEndPoint(addr, port));
-		}
+        /// <summary>
+        /// Defines on what address and what port the TCP socket will listen on.
+        /// </summary>
+        public void Bind(IPAddress addr, int port)
+        {
+            tcpListenSocket.Bind(new IPEndPoint(addr, port));
+        }
 
 #if __MonoCS__
 		/// <summary>
@@ -243,86 +245,100 @@ namespace Fos.Listener
 		}
 #endif
 
-		/// <summary>
-		/// Start this FastCgi application. Set <paramref name="background"/> to true to start this without blocking.
-		/// </summary>
-		public virtual void Start(bool background)
+        /// <summary>
+        /// Start this FastCgi application. Set <paramref name="background"/> to true to start this without blocking.
+        /// </summary>
+        public virtual void Start(bool background)
         {
-			if (!SomeListenSocketHasBeenBound)
-				throw new InvalidOperationException("You have to bind to some address or unix socket file first");
+            if (!SomeListenSocketHasBeenBound)
+                throw new InvalidOperationException("You have to bind to some address or unix socket file first");
 
-			if (tcpListenSocket != null && tcpListenSocket.IsBound)
-				tcpListenSocket.Listen(listenBacklog);
-			if (unixListenSocket != null && unixListenSocket.IsBound)
-				unixListenSocket.Listen(listenBacklog);
+            if (tcpListenSocket != null && tcpListenSocket.IsBound)
+            {
+                tcpListenSocket.Listen(listenBacklog);
+            }
 
-			// Wait for connections without blocking
-			IsRunning = true;
+            if (unixListenSocket != null && unixListenSocket.IsBound)
+            {
+                unixListenSocket.Listen(listenBacklog);
+            }
+
+            // Wait for connections without blocking
+            IsRunning = true;
 
             if (Logger != null)
                 Logger.ServerStart();
 
-			if (background)
+            if (background)
                 //TODO: If one of the tasks below is delayed (why in the world would that happen, idk) then this
                 // method returns without being ready to accept connections..
                 Task.Factory.StartNew(Work);
             else
-			    Work();
- 		}
+                Work();
+        }
 
-		/// <summary>
-		/// Closes the listen socket and all active connections without a proper goodbye.
-		/// </summary>
-		public virtual void Stop()
-		{
-			IsRunning = false;
+        /// <summary>
+        /// Closes the listen socket and all active connections without a proper goodbye.
+        /// </summary>
+        public virtual void Stop()
+        {
+            IsRunning = false;
 
-			if (tcpListenSocket != null && tcpListenSocket.IsBound)
-				tcpListenSocket.Close();
-			if (unixListenSocket != null && unixListenSocket.IsBound)
+            if (tcpListenSocket != null && tcpListenSocket.IsBound)
             {
-                unixListenSocket.Close();
-                System.IO.File.Delete(unixSocketFilePath);
+                tcpListenSocket.Dispose();
             }
 
-			//TODO: Stop task that waits for connection data..
+            if (unixListenSocket != null && unixListenSocket.IsBound)
+            {
+                unixListenSocket.Dispose();
+
+                if (File.Exists(unixSocketFilePath))
+                {
+                    File.Delete(unixSocketFilePath);
+                }
+            }
+
+            //TODO: Stop task that waits for connection data..
             if (Logger != null)
+            {
                 Logger.ServerStop();
+            }
 
-			foreach (var socketAndRequest in OpenSockets)
-			{
+            foreach (var socketAndRequest in OpenSockets)
+            {
                 socketAndRequest.Value.Dispose();
-			}
-		}
+            }
+        }
 
-		/// <summary>
-		/// Stops the server if it hasn't been stopped and disposes of resources, including a logger if one has been set.
-		/// </summary>
-		public virtual void Dispose()
-		{
-			Stop();
+        /// <summary>
+        /// Stops the server if it hasn't been stopped and disposes of resources, including a logger if one has been set.
+        /// </summary>
+        public virtual void Dispose()
+        {
+            Stop();
 
-			if (tcpListenSocket != null)
-				tcpListenSocket.Dispose();
-			if (unixListenSocket != null)
-				unixListenSocket.Dispose();
+            if (tcpListenSocket != null)
+                tcpListenSocket.Dispose();
+            if (unixListenSocket != null)
+                unixListenSocket.Dispose();
 
-			if (Logger != null)
-			{
-				var disposableLogger = Logger as IDisposable;
-				if (disposableLogger != null)
-					disposableLogger.Dispose();
-			}
-		}
+            if (Logger != null)
+            {
+                var disposableLogger = Logger as IDisposable;
+                if (disposableLogger != null)
+                    disposableLogger.Dispose();
+            }
+        }
 
-		public SocketListener()
-		{
-			tcpListenSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+        public SocketListener()
+        {
+            tcpListenSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
 #if __MonoCS__
 			unixListenSocket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.IP); // man unix (7) says most unix implementations are safe on delivery and order
 #endif
 
-			IsRunning = false;
-		}
-	}
+            IsRunning = false;
+        }
+    }
 }
