@@ -58,13 +58,16 @@ namespace Fos.Owin
 				var obj = ctor.Invoke(ctorArgs);
 				
 				// Now call the Invoke method, which has to be Invoke(IDict..)
-				//TODO: Check for perfect matching Invoke method signature
-				var invokeMethod = MiddlewareType.GetMethods(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public).FirstOrDefault(m => m.Name == "Invoke" && m.ReturnType == typeof(Task));
+				var invokeMethod = MiddlewareType
+                    .GetMethods(BindingFlags.Instance | BindingFlags.Public)
+                    .FirstOrDefault(m => m.Name == "Invoke" && m.ReturnType == typeof(Task));
+
 				if (invokeMethod == null)
 					throw new Exception("The next middleware does not have an appropriate Invoke method");
 
-				Delegate d = Delegate.CreateDelegate(typeof(Func<IDictionary<string, object>, Task>), obj, "Invoke");
-				_BuiltHandler = (Func<IDictionary<string, object>, Task>) d;
+                Delegate d = invokeMethod.CreateDelegate(typeof(Func<IDictionary<string, object>, Task>), obj);
+
+                _BuiltHandler = (Func<IDictionary<string, object>, Task>) d;
 			}
 			else
 			{
